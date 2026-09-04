@@ -27,6 +27,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <head>
+        <script
+          src="https://docs.opencv.org/4.9.0/opencv.js"
+          async
+        />
+      </head>
+
       <body
         className={`${sourceSerif.variable} ${inter.variable} font-sans bg-[#F5F8FA] text-[#152A3D] antialiased`}
       >
