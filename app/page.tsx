@@ -539,28 +539,27 @@ export default function Home() {
       </div>
 
       {scanner && (
-        <DocumentScanner
-          documentName={
-            DOCUMENTS.find(
-              (item) =>
-                item.key === scanner
-            )?.label ?? "Document"
-          }
-          onComplete={(
-            file,
-            compressed
-          ) => {
-            updateDocument(
-              scanner,
-              file,
-              compressed
-            );
-          }}
-          onClose={() =>
-            setScanner(null)
-          }
-        />
-      )}
-    </main>
-  );
-}
+  <DocumentScanner
+    documentName={
+      DOCUMENTS.find(
+        (item) =>
+          item.key === scanner
+      )?.label ?? "Document"
+    }
+    onComplete={(
+      file,
+      compressed
+    ) => {
+      updateDocument(
+        scanner,
+        file,
+        compressed
+      );
+
+      setScanner(null);
+    }}
+    onClose={() =>
+      setScanner(null)
+    }
+  />
+)}
