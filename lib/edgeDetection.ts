@@ -3,83 +3,126 @@ export interface Point {
   y: number;
 }
 
-export function detectDocumentCorners(cv: any, imgElement: HTMLImageElement): Point[] | null {
-  const src = cv.imread(imgElement);
-  const gray = new cv.Mat();
-  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-  const blurred = new cv.Mat();
-  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-  const edged = new cv.Mat();
-  cv.Canny(blurred, edged, 75, 200);
-  const dilated = new cv.Mat();
-  const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-  cv.dilate(edged, dilated, kernel);
-
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
-  cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-  let maxArea = 0;
-  let bestApprox: any = null;
-
-  for (let i = 0; i < contours.size(); i++) {
-    const contour = contours.get(i);
-    const peri = cv.arcLength(contour, true);
-    const approx = new cv.Mat();
-    cv.approxPolyDP(contour, approx, 0.02 * peri, true);
-
-    if (approx.rows === 4) {
-      const area = cv.contourArea(approx);
-      if (area > maxArea) {
-        maxArea = area;
-        if (bestApprox) bestApprox.delete();
-        bestApprox = approx;
-      } else {
-        approx.delete();
-      }
-    } else {
-      approx.delete();
-    }
-    contour.delete();
-  }
-
-  let points: Point[] | null = null;
-  if (bestApprox && maxArea > src.rows * src.cols * 0.1) {
-    points = [];
-    for (let i = 0; i < 4; i++) {
-      points.push({ x: bestApprox.data32S[i * 2], y: bestApprox.data32S[i * 2 + 1] });
-    }
-    bestApprox.delete();
-  }
-
-  src.delete();
-  gray.delete();
-  blurred.delete();
-  edged.delete();
-  dilated.delete();
-  kernel.delete();
-  contours.delete();
-  hierarchy.delete();
-
-  return points;
+export interface DetectionResult {
+  corners: Point[] | null;
+  confidence: number;
 }
 
 function orderCorners(pts: Point[]): Point[] {
-  const sorted = [...pts].sort((a, b) => a.y - b.y);
-  const top = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
-  const bottom = sorted.slice(2, 4).sort((a, b) => a.x - b.x);
-  return [top[0], top[1], bottom[1], bottom[0]]; // TL, TR, BR, BL
+  const sums = pts.map((p) => p.x + p.y);
+  const diffs = pts.map((p) => p.x - p.y);
+  const tl = pts[sums.indexOf(Math.min(...sums))];
+  const br = pts[sums.indexOf(Math.max(...sums))];
+  const tr = pts[diffs.indexOf(Math.max(...diffs))];
+  const bl = pts[diffs.indexOf(Math.min(...diffs))];
+  return [tl, tr, br, bl];
+}
+
+function distance(a: Point, b: Point) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function polygonArea(points: Point[]) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(area) / 2;
+}
+
+export function detectDocumentCorners(
+  cv: any,
+  source: HTMLImageElement | HTMLCanvasElement,
+): DetectionResult {
+  const src = cv.imread(source);
+  const gray = new cv.Mat();
+  const blurred = new cv.Mat();
+  const edged = new cv.Mat();
+  const dilated = new cv.Mat();
+  const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.Canny(blurred, edged, 50, 150);
+    cv.dilate(edged, dilated, kernel);
+    cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+    let best: Point[] | null = null;
+    let bestScore = 0;
+    const imageArea = src.rows * src.cols;
+
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const approx = new cv.Mat();
+      try {
+        const peri = cv.arcLength(contour, true);
+        cv.approxPolyDP(contour, approx, Math.max(2, 0.02 * peri), true);
+
+        if (approx.rows === 4) {
+          const area = Math.abs(cv.contourArea(approx));
+          const areaRatio = area / imageArea;
+          if (areaRatio >= 0.18 && areaRatio <= 0.98) {
+            const points: Point[] = [];
+            for (let j = 0; j < 4; j++) {
+              points.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+            }
+            const ordered = orderCorners(points);
+            const edge1 = distance(ordered[0], ordered[1]);
+            const edge2 = distance(ordered[1], ordered[2]);
+            const edge3 = distance(ordered[2], ordered[3]);
+            const edge4 = distance(ordered[3], ordered[0]);
+            const rectangularity = Math.min(edge1, edge3) / Math.max(edge1, edge3) *
+              (Math.min(edge2, edge4) / Math.max(edge2, edge4));
+            const score = areaRatio * (0.55 + 0.45 * Math.max(0, Math.min(1, rectangularity)));
+            if (score > bestScore) {
+              bestScore = score;
+              best = ordered;
+            }
+          }
+        }
+      } finally {
+        approx.delete();
+        contour.delete();
+      }
+    }
+
+    return {
+      corners: best,
+      confidence: best ? Math.min(1, bestScore / 0.75) : 0,
+    };
+  } finally {
+    src.delete();
+    gray.delete();
+    blurred.delete();
+    edged.delete();
+    dilated.delete();
+    kernel.delete();
+    contours.delete();
+    hierarchy.delete();
+  }
 }
 
 export function warpToRect(
   cv: any,
-  imgElement: HTMLImageElement,
+  source: HTMLImageElement | HTMLCanvasElement,
   corners: Point[],
-  outWidth = 1000,
-  outHeight = 630
+  outWidth = 1600,
+  outHeight = 1000,
 ): HTMLCanvasElement {
-  const src = cv.imread(imgElement);
+  const src = cv.imread(source);
   const ordered = orderCorners(corners);
+  const topWidth = distance(ordered[0], ordered[1]);
+  const bottomWidth = distance(ordered[3], ordered[2]);
+  const leftHeight = distance(ordered[0], ordered[3]);
+  const rightHeight = distance(ordered[1], ordered[2]);
+  const ratio = Math.max(0.45, Math.min(1.8, ((topWidth + bottomWidth) / 2) / ((leftHeight + rightHeight) / 2)));
+  const targetWidth = ratio >= 1 ? outWidth : outHeight;
+  const targetHeight = ratio >= 1 ? outHeight : outWidth;
 
   const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
     ordered[0].x, ordered[0].y,
@@ -89,18 +132,18 @@ export function warpToRect(
   ]);
   const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
     0, 0,
-    outWidth, 0,
-    outWidth, outHeight,
-    0, outHeight,
+    targetWidth, 0,
+    targetWidth, targetHeight,
+    0, targetHeight,
   ]);
 
   const M = cv.getPerspectiveTransform(srcTri, dstTri);
   const dst = new cv.Mat();
-  cv.warpPerspective(src, dst, M, new cv.Size(outWidth, outHeight));
+  cv.warpPerspective(src, dst, M, new cv.Size(targetWidth, targetHeight), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
 
   const canvas = document.createElement("canvas");
-  canvas.width = outWidth;
-  canvas.height = outHeight;
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
   cv.imshow(canvas, dst);
 
   src.delete();
@@ -109,4 +152,13 @@ export function warpToRect(
   M.delete();
   dst.delete();
   return canvas;
+}
+
+export function canvasToFile(canvas: HTMLCanvasElement, name: string, quality = 0.95): Promise<File> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) return reject(new Error("Could not create captured image"));
+      resolve(new File([blob], name, { type: "image/jpeg", lastModified: Date.now() }));
+    }, "image/jpeg", quality);
+  });
 }
