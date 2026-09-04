@@ -26,6 +26,15 @@ interface DocumentScannerProps {
   onClose: () => void;
 }
 
+type CornerIndex = 0 | 1 | 2 | 3;
+
+const CORNER_NAMES = [
+  "Top left",
+  "Top right",
+  "Bottom right",
+  "Bottom left",
+];
+
 export default function DocumentScanner({
   documentName,
   onComplete,
@@ -36,6 +45,12 @@ export default function DocumentScanner({
 
   const canvasRef =
     useRef<HTMLCanvasElement>(null);
+
+  const imageRef =
+    useRef<HTMLImageElement>(null);
+
+  const previewContainerRef =
+    useRef<HTMLDivElement>(null);
 
   const [stream, setStream] =
     useState<MediaStream | null>(null);
@@ -49,11 +64,17 @@ export default function DocumentScanner({
   const [corners, setCorners] =
     useState<Point[] | null>(null);
 
+  const [originalCorners, setOriginalCorners] =
+    useState<Point[] | null>(null);
+
   const [processing, setProcessing] =
     useState(false);
 
   const [opencvReady, setOpencvReady] =
     useState(false);
+
+  const [draggingCorner, setDraggingCorner] =
+    useState<CornerIndex | null>(null);
 
   const [message, setMessage] =
     useState(
@@ -61,10 +82,12 @@ export default function DocumentScanner({
     );
 
   const [resolution, setResolution] =
-    useState<ResolutionPreset>("medium");
+    useState<ResolutionPreset>(
+      "medium"
+    );
 
   /*
-   * Start camera after component mounts.
+   * Start OpenCV loading check.
    */
   useEffect(() => {
     waitForOpenCV();
@@ -75,18 +98,19 @@ export default function DocumentScanner({
   }, []);
 
   /*
-   * OpenCV is loaded through layout.tsx.
-   *
-   * Because the script uses async,
-   * we wait until window.cv exists.
+   * Wait for OpenCV because the script
+   * in layout.tsx is loaded asynchronously.
    */
   function waitForOpenCV() {
+    let attempts = 0;
+
     const check = () => {
       const cv =
         (window as any).cv;
 
       if (cv) {
         setOpencvReady(true);
+
         setMessage(
           "Position the document inside the frame."
         );
@@ -96,7 +120,21 @@ export default function DocumentScanner({
         return;
       }
 
-      setTimeout(check, 200);
+      attempts++;
+
+      /*
+       * Try for approximately 20 seconds.
+       */
+      if (attempts < 100) {
+        setTimeout(
+          check,
+          200
+        );
+      } else {
+        setMessage(
+          "Unable to load the document scanner engine. Please refresh the page."
+        );
+      }
     };
 
     check();
@@ -106,7 +144,8 @@ export default function DocumentScanner({
     try {
       if (
         !navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia
+        !navigator.mediaDevices
+          .getUserMedia
       ) {
         setMessage(
           "Camera is not supported on this device."
@@ -116,22 +155,26 @@ export default function DocumentScanner({
       }
 
       const mediaStream =
-        await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: {
-              ideal: "environment",
+        await navigator.mediaDevices.getUserMedia(
+          {
+            video: {
+              facingMode: {
+                ideal: "environment",
+              },
+              width: {
+                ideal: 1920,
+              },
+              height: {
+                ideal: 1080,
+              },
             },
-            width: {
-              ideal: 1920,
-            },
-            height: {
-              ideal: 1080,
-            },
-          },
-          audio: false,
-        });
+            audio: false,
+          }
+        );
 
-      setStream(mediaStream);
+      setStream(
+        mediaStream
+      );
 
       const video =
         videoRef.current;
@@ -143,7 +186,9 @@ export default function DocumentScanner({
         await video.play();
       }
     } catch (error) {
-      console.error(error);
+      console.error(
+        error
+      );
 
       setMessage(
         "Camera permission was denied. Please allow camera access."
@@ -152,17 +197,24 @@ export default function DocumentScanner({
   }
 
   function stopCamera() {
-    if (!stream) return;
+    if (!stream) {
+      return;
+    }
 
     stream
       .getTracks()
-      .forEach((track) => {
-        track.stop();
-      });
+      .forEach(
+        (track) => {
+          track.stop();
+        }
+      );
 
     setStream(null);
   }
 
+  /*
+   * Capture image from camera.
+   */
   function capturePhoto() {
     if (!opencvReady) {
       setMessage(
@@ -190,7 +242,9 @@ export default function DocumentScanner({
     const canvas =
       canvasRef.current;
 
-    if (!canvas) return;
+    if (!canvas) {
+      return;
+    }
 
     canvas.width =
       video.videoWidth;
@@ -201,7 +255,9 @@ export default function DocumentScanner({
     const context =
       canvas.getContext("2d");
 
-    if (!context) return;
+    if (!context) {
+      return;
+    }
 
     context.drawImage(
       video,
@@ -223,10 +279,15 @@ export default function DocumentScanner({
 
     stopCamera();
 
-    autoCrop(imageData);
+    detectCorners(
+      imageData
+    );
   }
 
-  async function autoCrop(
+  /*
+   * Detect document automatically.
+   */
+  async function detectCorners(
     imageData: string
   ) {
     setProcessing(true);
@@ -236,23 +297,27 @@ export default function DocumentScanner({
     );
 
     try {
-      const img =
+      const image =
         new Image();
 
-      img.src =
+      image.src =
         imageData;
 
       await new Promise<void>(
-        (resolve, reject) => {
-          img.onload = () =>
-            resolve();
+        (
+          resolve,
+          reject
+        ) => {
+          image.onload =
+            () => resolve();
 
-          img.onerror = () =>
-            reject(
-              new Error(
-                "Unable to load image."
-              )
-            );
+          image.onerror =
+            () =>
+              reject(
+                new Error(
+                  "Unable to load captured image."
+                )
+              );
         }
       );
 
@@ -261,25 +326,25 @@ export default function DocumentScanner({
 
       if (!cv) {
         throw new Error(
-          "OpenCV is not ready."
+          "OpenCV is not available."
         );
       }
 
-      /*
-       * Detect the four document corners.
-       */
       const detected =
         detectDocumentCorners(
           cv,
-          img
+          image
         );
 
+      /*
+       * Automatic detection failed.
+       */
       if (!detected) {
-        /*
-         * If automatic detection fails,
-         * keep the original image.
-         */
         setCorners(null);
+
+        setOriginalCorners(
+          null
+        );
 
         setProcessedImage(
           imageData
@@ -293,21 +358,287 @@ export default function DocumentScanner({
       }
 
       /*
-       * Save detected corners.
+       * Store both the original
+       * detection and editable corners.
        */
       setCorners(
         detected
       );
 
+      setOriginalCorners(
+        detected.map(
+          (point) => ({
+            ...point,
+          })
+        )
+      );
+
       /*
-       * Automatically straighten
-       * and crop the document.
+       * Do NOT crop immediately.
+       *
+       * First show the user the
+       * detected corners.
        */
+      setProcessedImage(
+        imageData
+      );
+
+      setMessage(
+        "Check the four corners. Drag them if needed, then tap Apply Crop."
+      );
+    } catch (error) {
+      console.error(
+        error
+      );
+
+      setCorners(null);
+
+      setOriginalCorners(
+        null
+      );
+
+      setProcessedImage(
+        imageData
+      );
+
+      setMessage(
+        "Automatic detection failed. You can use the original image."
+      );
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+  /*
+   * Convert pointer position from
+   * displayed image coordinates to
+   * original image coordinates.
+   */
+  function getImageCoordinates(
+    event:
+      | React.PointerEvent
+      | PointerEvent
+  ): Point | null {
+    const image =
+      imageRef.current;
+
+    if (!image) {
+      return null;
+    }
+
+    const rect =
+      image.getBoundingClientRect();
+
+    if (
+      rect.width === 0 ||
+      rect.height === 0
+    ) {
+      return null;
+    }
+
+    const naturalWidth =
+      image.naturalWidth;
+
+    const naturalHeight =
+      image.naturalHeight;
+
+    if (
+      !naturalWidth ||
+      !naturalHeight
+    ) {
+      return null;
+    }
+
+    const x =
+      ((event.clientX -
+        rect.left) /
+        rect.width) *
+      naturalWidth;
+
+    const y =
+      ((event.clientY -
+        rect.top) /
+        rect.height) *
+      naturalHeight;
+
+    return {
+      x: Math.max(
+        0,
+        Math.min(
+          naturalWidth,
+          x
+        )
+      ),
+      y: Math.max(
+        0,
+        Math.min(
+          naturalHeight,
+          y
+        )
+      ),
+    };
+  }
+
+  /*
+   * Start dragging a corner.
+   */
+  function handleCornerPointerDown(
+    index: CornerIndex,
+    event: React.PointerEvent
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    setDraggingCorner(
+      index
+    );
+
+    const target =
+      event.currentTarget as HTMLElement;
+
+    target.setPointerCapture(
+      event.pointerId
+    );
+  }
+
+  /*
+   * Move selected corner.
+   */
+  function handlePointerMove(
+    event: React.PointerEvent
+  ) {
+    if (
+      draggingCorner === null ||
+      !corners
+    ) {
+      return;
+    }
+
+    const point =
+      getImageCoordinates(
+        event
+      );
+
+    if (!point) {
+      return;
+    }
+
+    setCorners(
+      (previous) => {
+        if (!previous) {
+          return null;
+        }
+
+        return previous.map(
+          (
+            corner,
+            index
+          ) =>
+            index ===
+            draggingCorner
+              ? point
+              : corner
+        );
+      }
+    );
+  }
+
+  function handlePointerUp() {
+    setDraggingCorner(
+      null
+    );
+  }
+
+  /*
+   * Reset corners to OpenCV's
+   * original detection.
+   */
+  function resetCorners() {
+    if (!originalCorners) {
+      return;
+    }
+
+    setCorners(
+      originalCorners.map(
+        (point) => ({
+          ...point,
+        })
+      )
+    );
+
+    setMessage(
+      "Corners reset to automatic detection."
+    );
+  }
+
+  /*
+   * Apply crop using current corners.
+   */
+  async function applyCrop() {
+    if (
+      !capturedImage ||
+      !corners
+    ) {
+      /*
+       * No detected corners means
+       * original image is already being used.
+       */
+      setProcessedImage(
+        capturedImage
+      );
+
+      setMessage(
+        "Using the original image."
+      );
+
+      return;
+    }
+
+    setProcessing(true);
+
+    setMessage(
+      "Cropping and straightening document..."
+    );
+
+    try {
+      const image =
+        new Image();
+
+      image.src =
+        capturedImage;
+
+      await new Promise<void>(
+        (
+          resolve,
+          reject
+        ) => {
+          image.onload =
+            () => resolve();
+
+          image.onerror =
+            () =>
+              reject(
+                new Error(
+                  "Unable to load image."
+                )
+              );
+        }
+      );
+
+      const cv =
+        (window as any).cv;
+
+      if (!cv) {
+        throw new Error(
+          "OpenCV is unavailable."
+        );
+      }
+
       const croppedCanvas =
         warpToRect(
           cv,
-          img,
-          detected
+          image,
+          corners
         );
 
       const result =
@@ -321,25 +652,24 @@ export default function DocumentScanner({
       );
 
       setMessage(
-        "Document detected and automatically cropped."
+        "Document cropped and straightened successfully."
       );
     } catch (error) {
-      console.error(error);
-
-      setCorners(null);
-
-      setProcessedImage(
-        imageData
+      console.error(
+        error
       );
 
       setMessage(
-        "Automatic cropping failed. You can use the original image."
+        "Unable to crop the document."
       );
     } finally {
       setProcessing(false);
     }
   }
 
+  /*
+   * Use current processed image.
+   */
   async function finish() {
     if (!processedImage) {
       return;
@@ -381,7 +711,9 @@ export default function DocumentScanner({
 
       onClose();
     } catch (error) {
-      console.error(error);
+      console.error(
+        error
+      );
 
       setMessage(
         "Unable to process this document."
@@ -391,6 +723,9 @@ export default function DocumentScanner({
     }
   }
 
+  /*
+   * Download compressed document.
+   */
   async function downloadCompressed() {
     if (!processedImage) {
       return;
@@ -442,7 +777,9 @@ export default function DocumentScanner({
         url
       );
     } catch (error) {
-      console.error(error);
+      console.error(
+        error
+      );
 
       setMessage(
         "Unable to download compressed document."
@@ -450,16 +787,46 @@ export default function DocumentScanner({
     }
   }
 
+  /*
+   * Retake photograph.
+   */
   function retake() {
-    setCapturedImage(null);
-    setProcessedImage(null);
-    setCorners(null);
+    stopCamera();
+
+    setCapturedImage(
+      null
+    );
+
+    setProcessedImage(
+      null
+    );
+
+    setCorners(
+      null
+    );
+
+    setOriginalCorners(
+      null
+    );
+
+    setDraggingCorner(
+      null
+    );
+
     setMessage(
       "Position the document inside the frame."
     );
 
     startCamera();
   }
+
+  /*
+   * If no automatic corners were
+   * detected, allow the user to
+   * continue with original image.
+   */
+  const hasDetectedCorners =
+    !!corners;
 
   return (
     <div className="fixed inset-0 z-50 bg-black">
@@ -504,7 +871,7 @@ export default function DocumentScanner({
                 className="h-full w-full object-contain"
               />
 
-              {/* CAMERA GUIDE */}
+              {/* CAMERA FRAME */}
 
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="relative h-[62vw] max-h-[420px] w-[88vw] max-w-[760px] rounded-xl border-2 border-white">
@@ -520,15 +887,14 @@ export default function DocumentScanner({
                 </div>
               </div>
 
-              {/* STATUS */}
+              {/* MESSAGE */}
 
-              <div className="absolute bottom-5 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-center text-xs text-white">
+              <div className="absolute bottom-5 left-1/2 max-w-[90%] -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-center text-xs text-white">
                 {message}
               </div>
-
             </div>
 
-            {/* CAPTURE */}
+            {/* CAPTURE BUTTON */}
 
             <div className="bg-black px-6 py-6">
               <button
@@ -551,55 +917,212 @@ export default function DocumentScanner({
           </>
         ) : (
 
-          /* PREVIEW */
+          /* CAPTURED IMAGE */
 
-          <div className="flex flex-1 flex-col overflow-auto bg-[#F5F8FA]">
+          <div
+            className="flex flex-1 flex-col overflow-auto bg-[#F5F8FA]"
+            onPointerMove={
+              handlePointerMove
+            }
+            onPointerUp={
+              handlePointerUp
+            }
+            onPointerCancel={
+              handlePointerUp
+            }
+          >
+
+            {/* INSTRUCTION */}
 
             <div className="px-5 py-4">
 
               <h3 className="text-lg font-semibold text-[#152A3D]">
-                Preview
+                Adjust Document
               </h3>
 
               <p className="text-sm text-[#5D7186]">
-                {processing
-                  ? "Processing your document..."
-                  : corners
-                  ? "Document automatically detected and straightened."
-                  : "Original image is being used."}
+                {corners
+                  ? "Drag the four blue corners so they match the document edges."
+                  : message}
               </p>
 
             </div>
 
-            <div className="mx-5 overflow-hidden rounded-xl border bg-white shadow-sm">
+            {/* IMAGE + CORNERS */}
 
-              {processedImage && (
-                <img
-                  src={
-                    processedImage
-                  }
-                  alt="Processed document preview"
-                  className="block max-h-[55vh] w-full object-contain"
-                />
-              )}
+            <div
+              ref={
+                previewContainerRef
+              }
+              className="relative mx-5 overflow-hidden rounded-xl border bg-black shadow-sm touch-none"
+            >
+
+              <img
+                ref={imageRef}
+                src={
+                  capturedImage
+                }
+                alt="Captured document"
+                className="block max-h-[58vh] w-full object-contain"
+                draggable={false}
+              />
+
+              {/* CORNER OVERLAY */}
+
+              {corners &&
+                imageRef.current && (
+                  <>
+                    {/* POLYGON */}
+
+                    <svg
+                      className="pointer-events-none absolute inset-0 h-full w-full"
+                      viewBox={`0 0 ${imageRef.current.naturalWidth} ${imageRef.current.naturalHeight}`}
+                      preserveAspectRatio="none"
+                    >
+                      <polygon
+                        points={corners
+                          .map(
+                            (point) =>
+                              `${point.x},${point.y}`
+                          )
+                          .join(
+                            " "
+                          )}
+                        fill="rgba(15,76,129,0.15)"
+                        stroke="white"
+                        strokeWidth={
+                          Math.max(
+                            imageRef.current.naturalWidth /
+                              400,
+                            4
+                          )
+                        }
+                        strokeDasharray="12 8"
+                      />
+                    </svg>
+
+                    {/* DRAG HANDLES */}
+
+                    {corners.map(
+                      (
+                        point,
+                        index
+                      ) => {
+                        const left =
+                          `${
+                            (point.x /
+                              imageRef.current!.naturalWidth) *
+                            100
+                          }%`;
+
+                        const top =
+                          `${
+                            (point.y /
+                              imageRef.current!.naturalHeight) *
+                            100
+                          }%`;
+
+                        return (
+                          <button
+                            key={
+                              index
+                            }
+                            type="button"
+                            aria-label={
+                              CORNER_NAMES[
+                                index
+                              ]
+                            }
+                            onPointerDown={(
+                              event
+                            ) =>
+                              handleCornerPointerDown(
+                                index as CornerIndex,
+                                event
+                              )
+                            }
+                            className={`absolute h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border-4 border-white bg-[#0F4C81] shadow-lg ${
+                              draggingCorner ===
+                              index
+                                ? "scale-125"
+                                : ""
+                            }`}
+                            style={{
+                              left,
+                              top,
+                              touchAction:
+                                "none",
+                            }}
+                          />
+                        );
+                      }
+                    )}
+                  </>
+                )}
 
             </div>
 
-            {processing && (
-              <div className="px-5 py-6 text-center">
+            {/* STATUS */}
 
-                <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-[#0F4C81] border-t-transparent" />
+            <div className="px-5 py-3">
 
-                <p className="text-sm text-[#0F4C81]">
-                  Detecting and processing document...
+              <div className="rounded-lg border bg-white px-4 py-3">
+
+                <p className="text-sm font-medium text-[#152A3D]">
+                  {message}
                 </p>
 
+                {corners && (
+                  <p className="mt-1 text-xs text-[#5D7186]">
+                    Four corners detected automatically.
+                    Adjust them if necessary.
+                  </p>
+                )}
+
               </div>
-            )}
+
+            </div>
+
+            {/* CONTROLS */}
 
             {!processing && (
               <>
-                <div className="px-5 py-4">
+
+                {/* CORNER CONTROLS */}
+
+                {corners && (
+                  <div className="px-5 pb-3">
+
+                    <div className="grid grid-cols-2 gap-3">
+
+                      <button
+                        type="button"
+                        onClick={
+                          resetCorners
+                        }
+                        className="rounded-lg border border-[#D7E1E8] bg-white px-4 py-3 text-sm font-medium"
+                      >
+                        Reset Corners
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={
+                          applyCrop
+                        }
+                        className="rounded-lg bg-[#0F4C81] px-4 py-3 text-sm font-semibold text-white"
+                      >
+                        Apply Crop
+                      </button>
+
+                    </div>
+
+                  </div>
+                )}
+
+                {/* COMPRESSION */}
+
+                <div className="px-5 py-3">
 
                   <p className="mb-2 text-sm font-medium text-[#152A3D]">
                     Compression
@@ -657,6 +1180,8 @@ export default function DocumentScanner({
 
                 </div>
 
+                {/* ACTIONS */}
+
                 <div className="mt-auto grid gap-3 border-t bg-white p-5 sm:grid-cols-3">
 
                   <button
@@ -674,7 +1199,10 @@ export default function DocumentScanner({
                     onClick={
                       downloadCompressed
                     }
-                    className="rounded-lg border border-[#0F4C81] px-4 py-3 text-sm font-medium text-[#0F4C81]"
+                    disabled={
+                      !processedImage
+                    }
+                    className="rounded-lg border border-[#0F4C81] px-4 py-3 text-sm font-medium text-[#0F4C81] disabled:opacity-40"
                   >
                     Download Compressed
                   </button>
@@ -684,14 +1212,34 @@ export default function DocumentScanner({
                     onClick={
                       finish
                     }
-                    className="rounded-lg bg-[#0F4C81] px-4 py-3 text-sm font-semibold text-white"
+                    disabled={
+                      !processedImage ||
+                      !!corners
+                    }
+                    className="rounded-lg bg-[#0F4C81] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Use Document
                   </button>
 
                 </div>
+
               </>
             )}
+
+            {/* PROCESSING */}
+
+            {processing && (
+              <div className="border-t bg-white px-5 py-6 text-center">
+
+                <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-[#0F4C81] border-t-transparent" />
+
+                <p className="text-sm font-medium text-[#0F4C81]">
+                  Processing document...
+                </p>
+
+              </div>
+            )}
+
           </div>
         )}
       </div>
