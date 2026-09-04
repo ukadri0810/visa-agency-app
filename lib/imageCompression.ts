@@ -1,33 +1,83 @@
 export type ResolutionPreset = "high" | "medium";
 
-export const PRESETS: Record<ResolutionPreset, { maxDimension: number; quality: number; label: string; description: string }> = {
-  high: { maxDimension: 2400, quality: 0.92, label: "High resolution", description: "Best for printing and archiving" },
-  medium: { maxDimension: 1500, quality: 0.78, label: "Medium resolution", description: "Smaller file, faster sharing" },
+const PRESETS: Record<
+  ResolutionPreset,
+  {
+    maxDimension: number;
+    quality: number;
+  }
+> = {
+  high: {
+    maxDimension: 2200,
+    quality: 0.88,
+  },
+
+  medium: {
+    maxDimension: 1400,
+    quality: 0.68,
+  },
 };
 
-export async function compressImage(file: File | Blob, preset: ResolutionPreset): Promise<Blob> {
-  const { maxDimension, quality } = PRESETS[preset];
+export async function compressImage(
+  file: File | Blob,
+  preset: ResolutionPreset
+): Promise<Blob> {
+  const settings = PRESETS[preset];
+
   const bitmap = await createImageBitmap(file);
-  let { width, height } = bitmap;
-  const scale = Math.min(1, maxDimension / Math.max(width, height));
-  width = Math.max(1, Math.round(width * scale));
-  height = Math.max(1, Math.round(height * scale));
+
+  let width = bitmap.width;
+  let height = bitmap.height;
+
+  const largestSide = Math.max(width, height);
+
+  if (largestSide > settings.maxDimension) {
+    const scale =
+      settings.maxDimension / largestSide;
+
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
 
   const canvas = document.createElement("canvas");
+
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d", { alpha: false });
-  if (!ctx) throw new Error("Canvas not supported");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(bitmap, 0, 0, width, height);
+
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    bitmap.close();
+    throw new Error("Canvas is not supported.");
+  }
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  context.drawImage(
+    bitmap,
+    0,
+    0,
+    width,
+    height
+  );
+
   bitmap.close();
 
   return new Promise((resolve, reject) => {
     canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error("Compression failed"))),
+      (blob) => {
+        if (!blob) {
+          reject(
+            new Error("Unable to compress image.")
+          );
+          return;
+        }
+
+        resolve(blob);
+      },
       "image/jpeg",
-      quality,
+      settings.quality
     );
   });
 }
